@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>STARFALL — catch the falling stars</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #070b1e; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+"use strict";
+/* STARFALL — a tiny browser game built from one prompt.
+   Catch falling stars in your basket. 60 seconds, 3 lives.
+   Move with mouse, touch, or arrow keys. */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.floor(W * DPR);
+  canvas.height = Math.floor(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  buildSky();
+}
+window.addEventListener("resize", resize);
+
+// --- background stars (twinkle) ---
+let sky = [];
+function buildSky() {
+  sky = [];
+  const n = Math.floor(W * H / 9000);
+  for (let i = 0; i < n; i++) {
+    sky.push({
+      x: Math.random() * W, y: Math.random() * H,
+      r: 0.6 + Math.random() * 1.6,
+      p: Math.random() * Math.PI * 2,
+      s: 0.6 + Math.random() * 1.8
+    });
+  }
+}
+
+// --- game state ---
+const GAME_LEN = 60;
+let state = "menu"; // menu | play | over
+let score = 0, lives = 3, combo = 0, bestCombo = 0;
+let timeLeft = GAME_LEN, elapsed = 0;
+let stars = [], parts = [], floaters = [];
+let spawnTimer = 0, shake = 0;
+let best = 0;
+try { best = parseInt(localStorage.getItem("starfall-best") || "0", 10) || 0; } catch (e) { best = 0; }
+
+const player = { x: 0, y: 0, w: 150, h: 34, tx: 0, speed: 0 };
+function resetPlayer() {
+  player.w = Math.max(120, Math.min(190, W * 0.16));
+  player.h = 34;
+  player.x = W / 2; player.tx = W / 2;
+  player.y = H - 130;
+}
+
+function startGame() {
+  score = 0; lives = 3; combo = 0; bestCombo = 0;
+  timeLeft = GAME_LEN; elapsed = 0;
+  stars = []; parts = []; floaters = [];
+  spawnTimer = 0; shake = 0;
+  resetPlayer();
+  state = "play";
+}
+
+function spawnStar() {
+  const r = 16 + Math.random() * 12;
+  stars.push({
+    x: 30 + Math.random() * (W - 60),
+    y: -30,
+    r: r,
+    vy: (240 + Math.random() * 260) * (H / 900) * (1 + elapsed / 240),
+    sway: (Math.random() - 0.5) * 60,
+    ph: Math.random() * Math.PI * 2,
+    rot: Math.random() * Math.PI,
+    vr: (Math.random() - 0.5) * 2.4
+  });
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 60 + Math.random() * 220;
+    parts.push({
+      x: x, y: y,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60,
+      life: 0.5 + Math.random() * 0.4, t: 0,
+      r: 2 + Math.random() * 3.5, color: color
+    });
+  }
+}
+
+function update(dt) {
+  if (state !== "play") return;
+  elapsed += dt;
+  timeLeft = Math.max(0, GAME_LEN - elapsed);
+  if (timeLeft <= 0) { endGame(); return; }
+
+  // player follows target with smoothing
+  const dx = player.tx - player.x;
+  player.x += dx * Math.min(1, dt * 14);
+  player.x = Math.max(player.w / 2, Math.min(W - player.w / 2, player.x));
+
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnStar();
+    spawnTimer = Math.max(0.28, 0.55 - elapsed * 0.004);
+  }
+
+  for (let i = stars.length - 1; i >= 0; i--) {
+    const s = stars[i];
+    s.ph += dt * 2;
+    s.y += s.vy * dt;
+    s.x += Math.sin(s.ph) * s.sway * dt;
+    s.rot += s.vr * dt;
+    // caught?
+    if (s.y + s.r > player.y && s.y < player.y + player.h + 10 &&
+        Math.abs(s.x - player.x) < player.w / 2 + s.r * 0.4) {
+      combo++;
+      bestCombo = Math.max(bestCombo, combo);
+      const pts = 10 + Math.min(combo - 1, 9) * 2;
+      score += pts;
+      burst(s.x, s.y, "#ffd94d", 14);
+      floaters.push({ x: s.x, y: s.y - 10, text: "+" + pts, t: 0, life: 0.9 });
+      stars.splice(i, 1);
+      continue;
+    }
+    // missed
+    if (s.y - s.r > H) {
+      stars.splice(i, 1);
+      combo = 0;
+      lives--;
+      shake = 12;
+      burst(s.x, H - 20, "#ff5d73", 10);
+      if (lives <= 0) { endGame(); return; }
+    }
+  }
+
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.t += dt;
+    if (p.t >= p.life) { parts.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 320 * dt;
+  }
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const f = floaters[i];
+    f.t += dt; f.y -= 46 * dt;
+    if (f.t >= f.life) floaters.splice(i, 1);
+  }
+  if (shake > 0) shake = Math.max(0, shake - dt * 40);
+}
+
+function endGame() {
+  state = "over";
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem("starfall-best", String(best)); } catch (e) { /* private mode */ }
+  }
+}
+
+// --- drawing ---
+function drawStar(cx, cy, r, rot, color, glow) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(rot);
+  ctx.shadowColor = glow;
+  ctx.shadowBlur = 18;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rad = i % 2 === 0 ? r : r * 0.45;
+    const a = -Math.PI / 2 + i * Math.PI / 5;
+    const px = Math.cos(a) * rad, py = Math.sin(a) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function draw(t) {
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+
+  // sky
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#070b1e");
+  g.addColorStop(0.55, "#101736");
+  g.addColorStop(1, "#1b1040");
+  ctx.fillStyle = g;
+  ctx.fillRect(-20, -20, W + 40, H + 40);
+
+  // twinkling background stars
+  for (const s of sky) {
+    const a = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * s.s / 1000 + s.p));
+    ctx.globalAlpha = a;
+    ctx.fillStyle = "#cdd6ff";
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // moon
+  ctx.save();
+  ctx.shadowColor = "#ffe9a8";
+  ctx.shadowBlur = 40;
+  ctx.fillStyle = "#fff3c4";
+  ctx.beginPath();
+  ctx.arc(W - 90, 110, 42, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // falling stars
+  for (const s of stars) drawStar(s.x, s.y, s.r, s.rot, "#ffd94d", "#ffb400");
+
+  // particles
+  for (const p of parts) {
+    ctx.globalAlpha = 1 - p.t / p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // floaters
+  ctx.textAlign = "center";
+  for (const f of floaters) {
+    ctx.globalAlpha = 1 - f.t / f.life;
+    ctx.fillStyle = "#ffe98a";
+    ctx.font = "700 30px 'DejaVu Sans', sans-serif";
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+
+  if (state === "play" || state === "over") {
+    // basket
+    ctx.save();
+    ctx.shadowColor = "#7dd7ff";
+    ctx.shadowBlur = 22;
+    const bx = player.x - player.w / 2, by = player.y;
+    ctx.fillStyle = "#2ea8ff";
+    roundRect(bx, by, player.w, player.h, 12);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "#9fdcff";
+    roundRect(bx + 8, by + 6, player.w - 16, 8, 4);
+    ctx.fill();
+    ctx.restore();
+
+    // HUD (font sizes scale with width so score/timer never overlap
+    // on narrow portrait screens)
+    const hud = Math.round(Math.max(20, Math.min(34, W * 0.032)));
+    const hudCombo = Math.round(Math.max(18, Math.min(30, W * 0.028)));
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 " + hud + "px 'DejaVu Sans', sans-serif";
+    ctx.fillText("SCORE " + score, 28, 58);
+    ctx.textAlign = "center";
+    ctx.fillStyle = timeLeft <= 10 ? "#ff5d73" : "#ffffff";
+    ctx.fillText(Math.ceil(timeLeft) + "s", W / 2, 58);
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#ff5d73";
+    ctx.font = "700 " + hud + "px 'DejaVu Sans', sans-serif";
+    ctx.fillText("♥".repeat(Math.max(0, lives)), W - 28, 58);
+    if (combo >= 3) {
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#ffd94d";
+      ctx.font = "700 " + hudCombo + "px 'DejaVu Sans', sans-serif";
+      ctx.fillText("COMBO x" + combo, W / 2, 104);
+    }
+  }
+
+  if (state === "menu") {
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 92px 'DejaVu Sans', sans-serif";
+    ctx.fillText("STARFALL", W / 2, H * 0.34);
+    ctx.fillStyle = "#ffd94d";
+    ctx.font = "700 34px 'DejaVu Sans', sans-serif";
+    ctx.fillText("catch the falling stars", W / 2, H * 0.34 + 58);
+    ctx.fillStyle = "#cdd6ff";
+    ctx.font = "400 28px 'DejaVu Sans', sans-serif";
+    ctx.fillText("60 seconds · 3 lives · move with mouse, touch or ← →", W / 2, H * 0.34 + 118);
+    // start button
+    const bw = 340, bh = 84, bx = W / 2 - bw / 2, by = H * 0.52;
+    ctx.save();
+    ctx.shadowColor = "#ffd94d";
+    ctx.shadowBlur = 26;
+    ctx.fillStyle = "#ffd94d";
+    roundRect(bx, by, bw, bh, 20);
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = "#191419";
+    ctx.font = "700 38px 'DejaVu Sans', sans-serif";
+    ctx.fillText("▶  START", W / 2, by + 55);
+    if (best > 0) {
+      ctx.fillStyle = "#8f9bd6";
+      ctx.font = "400 26px 'DejaVu Sans', sans-serif";
+      ctx.fillText("best score: " + best, W / 2, by + 140);
+    }
+  }
+
+  if (state === "over") {
+    ctx.fillStyle = "rgba(4, 6, 18, 0.72)";
+    ctx.fillRect(-20, -20, W + 40, H + 40);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 72px 'DejaVu Sans', sans-serif";
+    ctx.fillText("TIME'S UP!", W / 2, H * 0.36);
+    ctx.fillStyle = "#ffd94d";
+    ctx.font = "700 110px 'DejaVu Sans', sans-serif";
+    ctx.fillText(String(score), W / 2, H * 0.36 + 130);
+    ctx.fillStyle = "#cdd6ff";
+    ctx.font = "400 30px 'DejaVu Sans', sans-serif";
+    ctx.fillText("best combo x" + bestCombo + "   ·   best score " + best, W / 2, H * 0.36 + 190);
+    const bw = 340, bh = 84, bx = W / 2 - bw / 2, by = H * 0.52;
+    ctx.save();
+    ctx.shadowColor = "#ffd94d";
+    ctx.shadowBlur = 26;
+    ctx.fillStyle = "#ffd94d";
+    roundRect(bx, by, bw, bh, 20);
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = "#191419";
+    ctx.font = "700 38px 'DejaVu Sans', sans-serif";
+    ctx.fillText("↻  PLAY AGAIN", W / 2, by + 55);
+  }
+  ctx.restore();
+}
+
+// --- input ---
+function setTarget(clientX) {
+  const rect = canvas.getBoundingClientRect();
+  player.tx = clientX - rect.left;
+}
+canvas.addEventListener("pointermove", (e) => { if (state === "play") setTarget(e.clientX); });
+canvas.addEventListener("pointerdown", (e) => {
+  if (state === "menu" || state === "over") { startGame(); return; }
+  setTarget(e.clientX);
+});
+const keys = {};
+window.addEventListener("keydown", (e) => {
+  keys[e.key] = true;
+  if ((e.key === "Enter" || e.key === " ") && (state === "menu" || state === "over")) startGame();
+});
+window.addEventListener("keyup", (e) => { keys[e.key] = false; });
+function pollKeys(dt) {
+  if (state !== "play") return;
+  const step = 620 * dt;
+  if (keys["ArrowLeft"] || keys["a"] || keys["A"]) player.tx -= step;
+  if (keys["ArrowRight"] || keys["d"] || keys["D"]) player.tx += step;
+  player.tx = Math.max(player.w / 2, Math.min(W - player.w / 2, player.tx));
+}
+
+// --- main loop ---
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  pollKeys(dt);
+  update(dt);
+  draw(now);
+  requestAnimationFrame(frame);
+}
+
+/* Automation hook for demo capture: lets a driver read the live
+   star positions and move the basket with real pointer input.
+   It changes nothing about the game itself. */
+window.__starfall = {
+  get state() { return state; },
+  get score() { return score; },
+  get stars() { return stars.map(s => ({ x: s.x, y: s.y, vy: s.vy })); },
+  get playerX() { return player.x; },
+  get basketY() { return player.y; }
+};
+
+resize();
+resetPlayer();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
